@@ -1,0 +1,108 @@
+import re
+import json
+import os
+import mysql.connector
+from django.http import JsonResponse
+from hdfs import InsecureClient
+from pyhive import hive
+import csv
+from util.configread import config_read
+from util.CustomJSONEncoder import CustomJsonEncoder
+from util.codes import normal_code, system_error_code
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, date_format
+import shutil
+# 获取当前文件路径的根目录
+parent_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+m_username = "Dell"
+hadoop_client = InsecureClient('http://localhost:9870')
+
+dbtype, host, port, user, passwd, dbName, charset,hasHadoop = config_read(os.path.join(parent_directory,"config.ini"))
+
+#将mysql里的相关表转成hive库里的表
+def migrate_to_hive():
+
+    mysql_conn = mysql.connector.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=passwd,
+        database=dbName
+    )
+    cursor = mysql_conn.cursor()
+
+    hive_conn = hive.Connection(
+        host='localhost',
+        port=10000,
+        username=m_username,
+    )
+    hive_cursor = hive_conn.cursor()
+    #创建Hive数据库（如果不存在）
+    hive_cursor.execute(f"CREATE DATABASE IF NOT EXISTS {dbName}")
+    hive_cursor.execute(f"USE {dbName}")
+
+    weatherinfo_table_path=f'/user/hive/warehouse/{dbName}.db/weatherinfo'
+    #删除已有的hive表
+    if hadoop_client.status(weatherinfo_table_path,strict=False):
+        hadoop_client.delete(weatherinfo_table_path, recursive=True)
+    # 在Hive中删除表
+    weatherinfo_drop_table_query = f"""DROP TABLE weatherinfo"""
+    hive_cursor.execute(weatherinfo_drop_table_query)
+    cursor.execute("SELECT * FROM weatherinfo")
+    weatherinfo_column_info = cursor.fetchall()
+    #将数据写入 CSV 文件
+    weatherinfo_path = os.path.join(parent_directory, "weatherinfo.csv")
+    with open(weatherinfo_path, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        # 写入数据行
+        for row in weatherinfo_column_info:
+            writer.writerow(row)
+    weatherinfo_spakr_clear(weatherinfo_path)
+    cursor.execute("DESCRIBE weatherinfo")
+    weatherinfo_column_info = cursor.fetchall()
+    create_table_query = "CREATE TABLE IF NOT EXISTS weatherinfo ("
+    for column, data_type, _, _, _, _ in weatherinfo_column_info:
+        match = re.match(r'(\w+)(\(\d+\))?', data_type)
+        mysql_type = match.group(1)
+        hive_data_type = get_hive_type(mysql_type)
+        create_table_query += f"{column} {hive_data_type}, "
+    weatherinfo_create_table_query = create_table_query[:-2] + ") row format delimited fields terminated by ','"
+    hive_cursor.execute(weatherinfo_create_table_query)
+    # 上传映射文件
+    weatherinfo_hdfs_csv_path = f'/user/hive/warehouse/{dbName}.db/weatherinfo'
+    hadoop_client.upload(weatherinfo_hdfs_csv_path, weatherinfo_path)
+    weatherinfoforecast_table_path=f'/user/hive/warehouse/{dbName}.db/weatherinfoforecast'
+    #删除已有的hive表
+    if hadoop_client.status(weatherinfoforecast_table_path,strict=False):
+        hadoop_client.delete(weatherinfoforecast_table_path, recursive=True)
+    # 在Hive中删除表
+    weatherinfoforecast_drop_table_query = f"""DROP TABLE weatherinfoforecast"""
+    hive_cursor.execute(weatherinfoforecast_drop_table_query)
+    cursor.execute("SELECT * FROM weatherinfoforecast")
+    weatherinfoforecast_column_info = cursor.fetchall()
+    #将数据写入 CSV 文件
+    weatherinfoforecast_path = os.path.join(parent_directory, "weatherinfoforecast.csv")
+    with open(weatherinfoforecast_path, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        # 写入数据行
+        for row in weatherinfoforecast_column_info:
+            writer.writerow(row)
+    weatherinfoforecast_spakr_clear(weatherinfoforecast_path)
+    cursor.execute("DESCRIBE weatherinfoforecast")
+    weatherinfoforecast_column_info = cursor.fetchall()
+    create_table_query = "CREATE TABLE IF NOT EXISTS weatherinfoforecast ("
+    for column, data_type, _, _, _, _ in weatherinfoforecast_column_info:
+        match = re.match(r'(\w+)(\(\d+\))?', data_type)
+        mysql_type = match.group(1)
+        hive_data_type = get_hive_type(mysql_type)
+        create_table_query += f"{column} {hive_data_type}, "
+    weatherinfoforecast_create_table_query = create_table_query[:-2] + ") row format delimited fields terminated by ','"
+    hive_cursor.execute(weatherinfoforecast_create_table_query)
+    # 上传映射文件
+    weatherinfoforecast_hdfs_csv_path = f'/user/hive/warehouse/{dbName}.db/weatherinfoforecast'
+    hadoop_client.upload(weatherinfoforecast_hdfs_csv_path, weatherinfoforecast_path)
+    cursor.close()
+    mysql_conn.close()
+    hive_cursor.close()
+    hive_conn.close()
